@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Field Area Capture</title>
+
+<!-- MapLibre GL JS -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<!-- Turf.js (geodesic area, length, self-intersection) -->
+<script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
+
+<style>
+:root{
+  --bg:#10140f; --panel:#181d16; --panel-2:#1f261c; --line:#2f3a2a;
+  --fg:#e8ede4; --muted:#93a089; --accent:#9ae65c; --accent-ink:#10140f;
+  --warn:#ffb020; --bad:#ff6b5a; --gps:#4db8ff;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg);color:var(--fg);font:14px/1.45 var(--sans);
+  display:grid;grid-template-columns:1fr 340px;overflow:hidden;
+}
+#map{width:100%;height:100%}
+.maplibregl-ctrl-attrib{font-size:10px}
+
+aside{
+  background:var(--panel);border-left:1px solid var(--line);
+  display:flex;flex-direction:column;overflow-y:auto;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:16px;gap:14px;
+}
+h1{font-size:15px;margin:0;letter-spacing:.02em}
+h1 span{display:block;font-size:11px;color:var(--muted);font-weight:400;letter-spacing:.04em;text-transform:uppercase;margin-top:3px}
+
+.group{display:flex;flex-direction:column;gap:7px}
+.lbl{font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+
+.seg{display:flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.seg button{
+  flex:1;min-width:0;background:transparent;border:0;color:var(--muted);
+  font:inherit;font-size:12px;padding:9px 6px;cursor:pointer;
+}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);font-weight:600}
+.seg button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+
+button.act{
+  background:var(--panel-2);border:1px solid var(--line);color:var(--fg);
+  font:inherit;font-size:13px;padding:10px;border-radius:7px;cursor:pointer;text-align:left;
+}
+button.act:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+button.act:disabled{opacity:.38;cursor:not-allowed}
+button.act.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600;text-align:center}
+button.act.danger:hover:not(:disabled){border-color:var(--bad);color:var(--bad)}
+.row{display:flex;gap:7px}
+.row>*{flex:1;min-width:0}
+
+.readout{background:var(--panel-2);border:1px solid var(--line);border-radius:9px;padding:14px}
+.area{font:600 30px/1 var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.area small{font-size:14px;font-weight:400;color:var(--muted);margin-left:5px}
+.pm{font:12px/1 var(--mono);color:var(--muted);margin-top:7px;font-variant-numeric:tabular-nums}
+.sub{display:flex;justify-content:space-between;gap:10px;margin-top:12px;padding-top:11px;border-top:1px solid var(--line);
+  font:11px/1.4 var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
+
+.flag{display:flex;gap:9px;align-items:flex-start;border-radius:7px;padding:10px;font-size:12px;line-height:1.4}
+.flag.bad{background:rgba(255,107,90,.12);border:1px solid rgba(255,107,90,.4);color:#ffb3a8}
+.flag.ok{background:rgba(77,184,255,.1);border:1px solid rgba(77,184,255,.32);color:#a8d8ff}
+.dot{width:7px;height:7px;border-radius:50%;flex:none;margin-top:5px;background:currentColor}
+
+table{width:100%;border-collapse:collapse;font:11px/1.3 var(--mono);font-variant-numeric:tabular-nums}
+th{text-align:left;color:var(--muted);font-weight:400;font-size:10px;letter-spacing:.07em;
+  text-transform:uppercase;padding:0 6px 6px 0;border-bottom:1px solid var(--line)}
+td{padding:5px 6px 5px 0;border-bottom:1px solid var(--line);color:var(--muted)}
+tr.sel td{color:var(--accent)}
+.src{font-size:9px;padding:1px 5px;border-radius:3px;letter-spacing:.05em}
+.src.gps{background:rgba(77,184,255,.18);color:var(--gps)}
+.src.tap{background:rgba(147,160,137,.16);color:var(--muted)}
+.src.sim{background:rgba(255,176,32,.18);color:var(--warn)}
+.scroll{max-height:190px;overflow-y:auto}
+.empty{color:var(--muted);font-size:12px;font-style:italic}
+
+.hint{font-size:11px;color:var(--muted);line-height:1.5}
+.hint code{font-family:var(--mono);color:var(--fg);font-size:10px}
+
+#gpsbar{
+  position:absolute;top:calc(10px + env(safe-area-inset-top,0px));
+  left:calc(10px + env(safe-area-inset-left,0px));
+  background:rgba(24,29,22,.93);border:1px solid var(--line);border-radius:7px;
+  padding:7px 11px;font:11px/1.3 var(--mono);color:var(--muted);
+  font-variant-numeric:tabular-nums;pointer-events:none;max-width:260px
+}
+#gpsbar b{color:var(--gps);font-weight:500}
+
+@media (max-width:860px){
+  body{grid-template-columns:1fr;grid-template-rows:52vh 1fr}
+  aside{border-left:0;border-top:1px solid var(--line)}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+<div id="gpsbar">Waiting for GPS fix…</div>
+
+<aside>
+  <h1>Field Area Capture<span>Prototype · MapLibre + Turf</span></h1>
+
+  <div class="group">
+    <div class="lbl">Capture mode</div>
+    <div class="seg" role="group">
+      <button id="m-tap" aria-pressed="true">Tap on map</button>
+      <button id="m-gps" aria-pressed="false">At my location</button>
+    </div>
+  </div>
+
+  <button class="act primary" id="addgps" disabled>Add point at my location</button>
+
+  <div class="row">
+    <button class="act" id="undo" disabled>Undo</button>
+    <button class="act" id="close" disabled>Zoom to field</button>
+  </div>
+
+  <div class="readout">
+    <div class="lbl" style="margin-bottom:8px">Measured area</div>
+    <div class="area"><span id="areaval">—</span><small id="areaunit"></small></div>
+    <div class="pm" id="margin"></div>
+    <div class="sub">
+      <span>Perimeter <b id="perim">—</b></span>
+      <span>Vertices <b id="count">0</b></span>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="lbl">Units</div>
+    <div class="seg" role="group">
+      <button data-u="ha" aria-pressed="true">Hectares</button>
+      <button data-u="ac" aria-pressed="false">Acres</button>
+      <button data-u="m2" aria-pressed="false">m²</button>
+      <button data-u="pl" aria-pressed="false">Plots</button>
+    </div>
+  </div>
+
+  <div id="flags"></div>
+
+  <div class="group">
+    <div class="lbl">Vertices</div>
+    <div class="scroll" id="vtable"><p class="empty">No points yet.</p></div>
+    <button class="act danger" id="delsel" disabled>Delete selected vertex</button>
+  </div>
+
+  <div class="row">
+    <button class="act" id="export" disabled>Export GeoJSON</button>
+    <button class="act danger" id="clear" disabled>Clear all</button>
+  </div>
+
+  <div class="group">
+    <div class="lbl">Basemap</div>
+    <div class="seg" role="group">
+      <button id="b-sat" aria-pressed="true">Satellite</button>
+      <button id="b-osm" aria-pressed="false">Street</button>
+    </div>
+  </div>
+
+  <p class="hint">
+    Tap the map to drop a pin, or stand at a corner and press <em>Add point at my location</em>.
+    Drag any pin to adjust it. Tap a faint midpoint marker to insert a new vertex there.
+    Tap a pin to select it for deletion.<br><br>
+    Area is computed geodesically with <code>turf.area()</code> — equivalent to
+    <code>ST_Area(geography)</code> in PostGIS, so the server can recompute and agree.
+  </p>
+</aside>
+
+<script>
+(function(){
+"use strict";
+
+/* ---------- library guard ---------- */
+var missing = [];
+if(typeof maplibregl === 'undefined') missing.push('MapLibre GL JS');
+if(typeof turf === 'undefined')       missing.push('Turf.js');
+if(missing.length){
+  document.getElementById('map').innerHTML =
+    '<div style="padding:28px;font:14px/1.6 system-ui;color:#ff6b5a;max-width:440px">' +
+    '<strong>Could not load ' + missing.join(' and ') + '.</strong><br><br>' +
+    'This page pulls both libraries from a CDN, so it needs an internet connection the first ' +
+    'time it runs. Check the Network tab for a failed request.</div>';
+  return;
+}
+
+/* ---------- state ---------- */
+var pts = [];           // {lng, lat, src:'tap'|'gps', acc:Number|null}
+var mode = 'tap';
+var unit = 'ha';
+var sel  = null;        // selected vertex index
+var dragIdx = null;
+var fix  = null;        // last GPS fix
+
+var UNITS = {
+  ha : {f:1/10000,  lbl:'ha',    dp:4},
+  ac : {f:1/4046.8564224, lbl:'acres', dp:3},
+  m2 : {f:1,        lbl:'m²',    dp:0},
+  pl : {f:1/650.321, lbl:'plots', dp:2}   // Ghanaian plot: 100ft × 70ft
+};
+
+/* ---------- map ---------- */
+var map = new maplibregl.Map({
+  container:'map',
+  center:[-1.6244, 6.6885],   // Kumasi
+  zoom:16,
+  style:{
+    version:8,
+    glyphs:'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+    sources:{
+      sat:{type:'raster',tileSize:256,maxzoom:19,
+        tiles:['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+        attribution:'Imagery © Esri, Maxar, Earthstar Geographics'},
+      osm:{type:'raster',tileSize:256,maxzoom:19,
+        tiles:['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+        attribution:'© OpenStreetMap contributors'}
+    },
+    layers:[
+      {id:'sat',type:'raster',source:'sat'},
+      {id:'osm',type:'raster',source:'osm',layout:{visibility:'none'}}
+    ]
+  }
+});
+map.addControl(new maplibregl.NavigationControl({showCompass:false}),'top-right');
+map.addControl(new maplibregl.ScaleControl({maxWidth:110,unit:'metric'}),'bottom-left');
+
+var empty = {type:'FeatureCollection',features:[]};
+
+map.on('load', function(){
+  ['poly','ring','verts','mids','me'].forEach(function(id){
+    map.addSource(id,{type:'geojson',data:empty});
+  });
+
+  map.addLayer({id:'poly-f',type:'fill',source:'poly',
+    paint:{'fill-color':'#9ae65c','fill-opacity':0.18}});
+  map.addLayer({id:'poly-l',type:'line',source:'ring',
+    paint:{'line-color':'#9ae65c','line-width':2.5}});
+  map.addLayer({id:'mids',type:'circle',source:'mids',
+    paint:{'circle-radius':5,'circle-color':'#9ae65c','circle-opacity':0.45,
+           'circle-stroke-width':1,'circle-stroke-color':'#10140f'}});
+  map.addLayer({id:'verts',type:'circle',source:'verts',
+    paint:{
+      'circle-radius':['case',['get','sel'],9,7],
+      'circle-color':['case',['==',['get','src'],'gps'],'#4db8ff',
+                      ['==',['get','src'],'sim'],'#ffb020','#ffffff'],
+      'circle-stroke-width':['case',['get','sel'],3,2],
+      'circle-stroke-color':['case',['get','sel'],'#9ae65c','#10140f']
+    }});
+  map.addLayer({id:'me-acc',type:'circle',source:'me',
+    paint:{'circle-radius':['get','px'],'circle-color':'#4db8ff','circle-opacity':0.13,
+           'circle-stroke-width':1,'circle-stroke-color':'rgba(77,184,255,.5)'}});
+  map.addLayer({id:'me-dot',type:'circle',source:'me',
+    paint:{'circle-radius':6,'circle-color':'#4db8ff','circle-stroke-width':2,'circle-stroke-color':'#fff'}});
+
+  wireMap();
+  render();
+});
+
+/* ---------- geometry helpers ---------- */
+function ring(){
+  if(pts.length < 3) return null;
+  var c = pts.map(function(p){return [p.lng,p.lat];});
+  c.push(c[0]);
+  return c;
+}
+function polygon(){
+  var r = ring();
+  return r ? turf.polygon([r]) : null;
+}
+
+/* ---------- render ---------- */
+function render(){
+  if(!map.getSource('verts')) return;
+
+  map.getSource('verts').setData({
+    type:'FeatureCollection',
+    features: pts.map(function(p,i){
+      return {type:'Feature',
+        properties:{idx:i, src:p.src, sel:(i===sel)},
+        geometry:{type:'Point',coordinates:[p.lng,p.lat]}};
+    })
+  });
+
+  // midpoint handles
+  var mids = [];
+  if(pts.length >= 2){
+    var n = pts.length;
+    var last = (n >= 3) ? n : n - 1;   // include closing segment once it's a polygon
+    for(var i=0;i<last;i++){
+      var a = pts[i], b = pts[(i+1)%n];
+      mids.push({type:'Feature',properties:{after:i},
+        geometry:{type:'Point',coordinates:[(a.lng+b.lng)/2,(a.lat+b.lat)/2]}});
+    }
+  }
+  map.getSource('mids').setData({type:'FeatureCollection',features:mids});
+
+  var r = ring();
+  map.getSource('poly').setData(r ? turf.polygon([r]) : empty);
+  map.getSource('ring').setData(
+    pts.length >= 2
+      ? turf.lineString(r || pts.map(function(p){return [p.lng,p.lat];}))
+      : empty
+  );
+
+  readout();
+  table();
+  buttons();
+}
+
+/* ---------- measurement ---------- */
+function readout(){
+  var av = document.getElementById('areaval');
+  var au = document.getElementById('areaunit');
+  var pm = document.getElementById('margin');
+  var pr = document.getElementById('perim');
+  document.getElementById('count').textContent = pts.length;
+
+  var poly = polygon();
+  if(!poly){
+    av.textContent = '—'; au.textContent = '';
+    pm.textContent = pts.length ? (3 - pts.length) + ' more point' +
+      (3 - pts.length === 1 ? '' : 's') + ' needed' : '';
+    pr.textContent = '—';
+    flags([]);
+    return;
+  }
+
+  var m2   = turf.area(poly);
+  var perM = turf.length(turf.lineString(ring()),{units:'kilometers'}) * 1000;
+  var u    = UNITS[unit];
+
+  av.textContent = (m2 * u.f).toFixed(u.dp);
+  au.textContent = u.lbl;
+  pr.textContent = perM < 1000 ? perM.toFixed(0) + ' m' : (perM/1000).toFixed(2) + ' km';
+
+  // First-order positional uncertainty: area error ≈ perimeter × σ_position
+  var accs = pts.map(function(p){ return p.acc != null ? p.acc : 5; });
+  var sigma = accs.reduce(function(a,b){return a+b;},0) / accs.length;
+  var dM2 = perM * sigma;
+  pm.textContent = '± ' + (dM2 * u.f).toFixed(u.dp) + ' ' + u.lbl +
+    '  (σ ≈ ' + sigma.toFixed(1) + ' m)';
+
+  // validation
+  var out = [];
+  var k = turf.kinks(poly);
+  if(k.features.length){
+    out.push(['bad','Boundary crosses itself at ' + k.features.length +
+      ' point' + (k.features.length===1?'':'s') +
+      '. The area shown is wrong — drag a vertex to untangle it.']);
+  }
+  if(sigma > 10){
+    out.push(['bad','Mean positional error is ' + sigma.toFixed(0) +
+      ' m. Too coarse for a plot this size — wait for a better fix or pair an external GNSS receiver.']);
+  }
+  var gps = pts.filter(function(p){return p.src==='gps';}).length;
+  if(gps && gps < pts.length){
+    out.push(['ok','Mixed capture: ' + gps + ' GPS point' + (gps===1?'':'s') +
+      ', ' + (pts.length-gps) + ' traced on imagery. Both are recorded per vertex on export.']);
+  } else if(!gps && pts.length >= 3){
+    out.push(['ok','All vertices traced on imagery. Basemaps in rural areas can sit several metres off true position — capture one GPS point as an anchor to check.']);
+  }
+  flags(out);
+}
+
+function flags(list){
+  document.getElementById('flags').innerHTML = list.map(function(f){
+    return '<div class="flag ' + f[0] + '"><span class="dot"></span><span>' + f[1] + '</span></div>';
+  }).join('');
+}
+
+function table(){
+  var el = document.getElementById('vtable');
+  if(!pts.length){ el.innerHTML = '<p class="empty">No points yet.</p>'; return; }
+  var rows = pts.map(function(p,i){
+    return '<tr class="' + (i===sel?'sel':'') + '" data-i="' + i + '">' +
+      '<td>' + (i+1) + '</td>' +
+      '<td>' + p.lat.toFixed(6) + '</td>' +
+      '<td>' + p.lng.toFixed(6) + '</td>' +
+      '<td><span class="src ' + p.src + '">' + p.src.toUpperCase() + '</span></td>' +
+      '<td>' + (p.acc != null ? '±' + p.acc.toFixed(0) + 'm' : '—') + '</td></tr>';
+  }).join('');
+  el.innerHTML = '<table><thead><tr><th>#</th><th>Lat</th><th>Lng</th><th>Src</th><th>Acc</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  Array.prototype.forEach.call(el.querySelectorAll('tr[data-i]'), function(tr){
+    tr.style.cursor = 'pointer';
+    tr.addEventListener('click', function(){
+      var i = +tr.dataset.i;
+      sel = (sel === i) ? null : i;
+      render();
+    });
+  });
+}
+
+function buttons(){
+  document.getElementById('undo').disabled   = !pts.length;
+  document.getElementById('clear').disabled  = !pts.length;
+  document.getElementById('close').disabled  = pts.length < 2;
+  document.getElementById('export').disabled = pts.length < 3;
+  document.getElementById('delsel').disabled = sel === null;
+  document.getElementById('addgps').disabled = !fix;
+}
+
+/* ---------- interaction ---------- */
+function wireMap(){
+  map.on('click', function(e){
+    if(dragIdx !== null) return;
+    var hit = map.queryRenderedFeatures(e.point,{layers:['verts','mids']});
+    if(hit.length){
+      var f = hit[0];
+      if(f.layer.id === 'verts'){
+        var i = f.properties.idx;
+        sel = (sel === i) ? null : i;
+      } else {
+        var after = f.properties.after;
+        pts.splice(after + 1, 0, {
+          lng:f.geometry.coordinates[0], lat:f.geometry.coordinates[1],
+          src:'tap', acc:null
+        });
+        sel = after + 1;
+      }
+      render();
+      return;
+    }
+    if(mode !== 'tap') return;
+    pts.push({lng:e.lngLat.lng, lat:e.lngLat.lat, src:'tap', acc:null});
+    sel = null;
+    render();
+  });
+
+  function grab(e){
+    if(!e.features || !e.features.length) return;
+    e.preventDefault();
+    dragIdx = e.features[0].properties.idx;
+    map.dragPan.disable();
+    map.getCanvas().style.cursor = 'grabbing';
+  }
+  function move(e){
+    if(dragIdx === null) return;
+    pts[dragIdx].lng = e.lngLat.lng;
+    pts[dragIdx].lat = e.lngLat.lat;
+    pts[dragIdx].src = 'tap';     // moved by hand — no longer a GPS observation
+    pts[dragIdx].acc = null;
+    render();
+  }
+  function drop(){
+    if(dragIdx === null) return;
+    dragIdx = null;
+    map.dragPan.enable();
+    map.getCanvas().style.cursor = '';
+  }
+
+  map.on('mousedown','verts',grab);
+  map.on('touchstart','verts',grab);
+  map.on('mousemove',move);
+  map.on('touchmove',move);
+  map.on('mouseup',drop);
+  map.on('touchend',drop);
+
+  map.on('mouseenter','verts',function(){ if(dragIdx===null) map.getCanvas().style.cursor='grab'; });
+  map.on('mouseleave','verts',function(){ if(dragIdx===null) map.getCanvas().style.cursor=''; });
+  map.on('mouseenter','mids', function(){ map.getCanvas().style.cursor='copy'; });
+  map.on('mouseleave','mids', function(){ map.getCanvas().style.cursor=''; });
+}
+
+/* ---------- GPS ---------- */
+var bar = document.getElementById('gpsbar');
+var watchId = null;
+
+function onFix(pos){
+  fix = pos.coords;
+  bar.innerHTML = 'GPS <b>' + fix.latitude.toFixed(6) + ', ' + fix.longitude.toFixed(6) +
+    '</b> &middot; accuracy <b>&plusmn;' + fix.accuracy.toFixed(0) + ' m</b>';
+  if(map.getSource('me')){
+    var mpp = 156543.03392 * Math.cos(fix.latitude*Math.PI/180) / Math.pow(2, map.getZoom());
+    map.getSource('me').setData({type:'Feature',
+      properties:{px: Math.max(6, Math.min(180, fix.accuracy/mpp))},
+      geometry:{type:'Point',coordinates:[fix.longitude,fix.latitude]}});
+  }
+  buttons();
+}
+
+function diagnose(err){
+  var secure = window.isSecureContext;
+  var proto  = location.protocol;
+  if(!secure){
+    return 'Location is blocked because this page is on <b>' + proto + '</b>. ' +
+      'Browsers only allow it on https:// or localhost. Serve the folder with ' +
+      '<b>python3 -m http.server</b> and open localhost:8000.';
+  }
+  if(err.code === 1){
+    return 'Location permission was denied. Click the padlock in the address bar and ' +
+      'set Location to Allow, then reload.';
+  }
+  if(err.code === 2){
+    return 'No position source available. A desktop without WiFi scanning cannot locate ' +
+      'itself &mdash; test on a phone for a real GNSS fix.';
+  }
+  return 'No fix within the time limit. Desktops have no GPS chip and fall back to a WiFi ' +
+    'lookup, which is often empty in Ghana. Test on a phone outdoors. Tap-on-map still works.';
+}
+
+function startWatch(highAccuracy, timeout, onFail){
+  if(watchId !== null) navigator.geolocation.clearWatch(watchId);
+  watchId = navigator.geolocation.watchPosition(onFix, onFail,
+    {enableHighAccuracy:highAccuracy, maximumAge:highAccuracy?1000:30000, timeout:timeout});
+}
+
+if(!navigator.geolocation){
+  bar.innerHTML = 'This browser has no geolocation API. Tap-on-map mode still works.';
+} else {
+  bar.innerHTML = 'Waiting for GPS fix&hellip;';
+  // Pass 1: high accuracy (real GNSS). Pass 2: coarse network lookup.
+  startWatch(true, 30000, function(err){
+    if(err.code === 3){
+      bar.innerHTML = 'No precise fix &mdash; trying coarse network location&hellip;';
+      startWatch(false, 30000, function(err2){
+        bar.innerHTML = diagnose(err2) + ' <span id="simwrap"></span>';
+        offerSim();
+      });
+    } else {
+      bar.innerHTML = diagnose(err) + ' <span id="simwrap"></span>';
+      offerSim();
+    }
+  });
+}
+
+/* Desktop fallback: treat the map centre as "my location" so the GPS capture
+   path can still be demonstrated without a real receiver. Points captured this
+   way are tagged 'sim' and never counted as observations. */
+function offerSim(){
+  var w = document.getElementById('simwrap');
+  if(!w || w.dataset.done) return;
+  w.dataset.done = '1';
+  var b = document.createElement('button');
+  b.textContent = 'Simulate GPS at map centre';
+  b.style.cssText = 'pointer-events:auto;margin-top:8px;display:block;background:#1f261c;' +
+    'color:#9ae65c;border:1px solid #2f3a2a;border-radius:5px;padding:6px 9px;' +
+    'font:inherit;font-size:11px;cursor:pointer';
+  b.onclick = function(){
+    var c = map.getCenter();
+    fix = {latitude:c.lat, longitude:c.lng, accuracy:8, simulated:true};
+    onFix({coords:fix});
+    bar.innerHTML += ' <b style="color:#ffb020">SIMULATED</b>';
+  };
+  w.parentNode.insertBefore(b, w);
+  bar.style.pointerEvents = 'auto';
+}
+
+/* ---------- controls ---------- */
+function press(btn, on){ btn.setAttribute('aria-pressed', on ? 'true' : 'false'); }
+
+document.getElementById('m-tap').onclick = function(){
+  mode='tap'; press(this,true); press(document.getElementById('m-gps'),false);
+};
+document.getElementById('m-gps').onclick = function(){
+  mode='gps'; press(this,true); press(document.getElementById('m-tap'),false);
+};
+
+document.getElementById('addgps').onclick = function(){
+  if(!fix) return;
+  pts.push({lng:fix.longitude, lat:fix.latitude,
+            src: fix.simulated ? 'sim' : 'gps', acc:fix.accuracy});
+  sel = null;
+  map.easeTo({center:[fix.longitude,fix.latitude]});
+  render();
+};
+
+document.getElementById('undo').onclick = function(){
+  pts.pop(); sel = null; render();
+};
+document.getElementById('clear').onclick = function(){
+  pts = []; sel = null; render();
+};
+document.getElementById('delsel').onclick = function(){
+  if(sel === null) return;
+  pts.splice(sel,1); sel = null; render();
+};
+document.getElementById('close').onclick = function(){
+  if(pts.length < 2) return;
+  var b = new maplibregl.LngLatBounds();
+  pts.forEach(function(p){ b.extend([p.lng,p.lat]); });
+  map.fitBounds(b,{padding:70,maxZoom:19});
+};
+
+Array.prototype.forEach.call(document.querySelectorAll('[data-u]'), function(b){
+  b.onclick = function(){
+    unit = b.dataset.u;
+    Array.prototype.forEach.call(document.querySelectorAll('[data-u]'), function(x){
+      press(x, x === b);
+    });
+    readout();
+  };
+});
+
+document.getElementById('b-sat').onclick = function(){
+  map.setLayoutProperty('sat','visibility','visible');
+  map.setLayoutProperty('osm','visibility','none');
+  press(this,true); press(document.getElementById('b-osm'),false);
+};
+document.getElementById('b-osm').onclick = function(){
+  map.setLayoutProperty('osm','visibility','visible');
+  map.setLayoutProperty('sat','visibility','none');
+  press(this,true); press(document.getElementById('b-sat'),false);
+};
+
+document.getElementById('export').onclick = function(){
+  var poly = polygon();
+  if(!poly) return;
+  var m2 = turf.area(poly);
+  var perM = turf.length(turf.lineString(ring()),{units:'kilometers'}) * 1000;
+  var accs = pts.map(function(p){ return p.acc != null ? p.acc : 5; });
+  var sigma = accs.reduce(function(a,b){return a+b;},0) / accs.length;
+
+  var fc = {
+    type:'FeatureCollection',
+    features:[{
+      type:'Feature',
+      properties:{
+        captured_at: new Date().toISOString(),
+        capture_methods: Array.from(new Set(pts.map(function(p){return p.src;}))),
+        vertex_count: pts.length,
+        area_m2: +m2.toFixed(2),
+        area_ha: +(m2/10000).toFixed(4),
+        area_acres: +(m2/4046.8564224).toFixed(4),
+        perimeter_m: +perM.toFixed(1),
+        mean_position_sigma_m: +sigma.toFixed(1),
+        area_uncertainty_m2: +(perM*sigma).toFixed(1),
+        self_intersecting: turf.kinks(poly).features.length > 0,
+        vertices: pts.map(function(p,i){
+          return {seq:i+1, lat:p.lat, lng:p.lng, source:p.src, accuracy_m:p.acc};
+        })
+      },
+      geometry: poly.geometry
+    }]
+  };
+
+  var blob = new Blob([JSON.stringify(fc,null,2)],{type:'application/geo+json'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'field-' + Date.now() + '.geojson';
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+};
+
+/* keyboard */
+document.addEventListener('keydown', function(e){
+  if(e.target.tagName === 'INPUT') return;
+  if((e.ctrlKey||e.metaKey) && e.key === 'z'){ e.preventDefault(); pts.pop(); sel=null; render(); }
+  if(e.key === 'Delete' || e.key === 'Backspace'){
+    if(sel !== null){ e.preventDefault(); pts.splice(sel,1); sel=null; render(); }
+  }
+  if(e.key === 'Escape'){ sel = null; render(); }
+});
+
+})();
+</script>
+</body>
+</html>
