@@ -123,6 +123,7 @@ tr.sel td{color:var(--accent)}
 
   <div class="row">
     <button class="act" id="undo" disabled>Undo</button>
+    <button class="act" id="recentre" disabled>Centre on me</button>
     <button class="act" id="close" disabled>Zoom to field</button>
   </div>
 
@@ -200,6 +201,8 @@ var unit = 'ha';
 var sel  = null;        // selected vertex index
 var dragIdx = null;
 var fix  = null;        // last GPS fix
+var centred = false;    // have we jumped to the first fix?
+var follow  = true;     // keep recentring until the user pans
 
 var UNITS = {
   ha : {f:1/10000,  lbl:'ha',    dp:4},
@@ -262,6 +265,8 @@ map.on('load', function(){
     paint:{'circle-radius':6,'circle-color':'#4db8ff','circle-stroke-width':2,'circle-stroke-color':'#fff'}});
 
   wireMap();
+  map.on('dragstart', function(){ follow = false; });
+  map.on('zoomstart', function(e){ if(e.originalEvent) follow = false; });
   render();
 });
 
@@ -406,6 +411,7 @@ function buttons(){
   document.getElementById('export').disabled = pts.length < 3;
   document.getElementById('delsel').disabled = sel === null;
   document.getElementById('addgps').disabled = !fix;
+  document.getElementById('recentre').disabled = !fix;
 }
 
 /* ---------- interaction ---------- */
@@ -483,6 +489,13 @@ function onFix(pos){
     map.getSource('me').setData({type:'Feature',
       properties:{px: Math.max(6, Math.min(180, fix.accuracy/mpp))},
       geometry:{type:'Point',coordinates:[fix.longitude,fix.latitude]}});
+  }
+  if(!centred){
+    centred = true;
+    map.jumpTo({center:[fix.longitude,fix.latitude], zoom:18});
+    bar.innerHTML += ' <b style="color:#9ae65c">&#10003; centred</b>';
+  } else if(follow){
+    map.easeTo({center:[fix.longitude,fix.latitude], duration:600});
   }
   buttons();
 }
@@ -583,6 +596,12 @@ document.getElementById('delsel').onclick = function(){
   if(sel === null) return;
   pts.splice(sel,1); sel = null; render();
 };
+document.getElementById('recentre').onclick = function(){
+  if(!fix){ bar.innerHTML = 'No position yet \u2014 cannot centre.'; return; }
+  follow = true;
+  map.easeTo({center:[fix.longitude,fix.latitude], zoom:Math.max(map.getZoom(),18)});
+};
+
 document.getElementById('close').onclick = function(){
   if(pts.length < 2) return;
   var b = new maplibregl.LngLatBounds();
