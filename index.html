@@ -96,6 +96,36 @@ tr.sel td{color:var(--accent)}
 }
 #gpsbar b{color:var(--gps);font-weight:500}
 
+/* crop sampling */
+input.txt{background:var(--panel-2);border:1px solid var(--line);color:var(--fg);
+  font:inherit;font-size:12px;padding:9px;border-radius:6px;width:100%}
+input.txt:focus{outline:2px solid var(--accent);outline-offset:-1px}
+
+.samp{background:var(--panel-2);border:1px solid var(--line);border-radius:8px;
+  padding:10px;margin-bottom:8px}
+.samp.pending{border-color:var(--warn)}
+.samp.done{border-color:var(--accent)}
+.samp-hd{display:flex;justify-content:space-between;align-items:center;gap:8px;
+  font:11px/1 var(--mono);color:var(--muted);margin-bottom:8px}
+.samp-hd b{color:var(--fg);font-weight:500}
+.thumbs{display:flex;gap:5px;margin-bottom:8px;flex-wrap:wrap}
+.thumbs img{width:46px;height:46px;object-fit:cover;border-radius:4px;border:1px solid var(--line)}
+.cand{display:flex;justify-content:space-between;align-items:center;gap:8px;
+  width:100%;background:transparent;border:1px solid var(--line);border-radius:5px;
+  color:var(--fg);font:inherit;font-size:12px;padding:7px 9px;cursor:pointer;
+  text-align:left;margin-bottom:4px}
+.cand:hover{border-color:var(--accent);color:var(--accent)}
+.cand .sci{color:var(--muted);font-size:10px;font-style:italic;display:block}
+.cand .pc{font:11px var(--mono);color:var(--muted);flex:none;font-variant-numeric:tabular-nums}
+.chosen{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--accent);font-weight:600}
+.chosen .meta{font:10px var(--mono);color:var(--muted);font-weight:400}
+.mini{background:transparent;border:0;color:var(--muted);font:inherit;font-size:11px;
+  cursor:pointer;text-decoration:underline;padding:0}
+.mini:hover{color:var(--fg)}
+.spin{display:inline-block;width:9px;height:9px;border:2px solid var(--line);
+  border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+
 @media (max-width:860px){
   body{grid-template-columns:1fr;grid-template-rows:52vh 1fr}
   aside{border-left:0;border-top:1px solid var(--line)}
@@ -150,6 +180,25 @@ tr.sel td{color:var(--accent)}
   <div id="flags"></div>
 
   <div class="group">
+    <div class="lbl">Crop samples <span id="quota" style="float:right;font:10px var(--mono);text-transform:none;letter-spacing:0"></span></div>
+    <p class="hint" id="cropnotice">Close the field boundary first, then sample the crop inside it.</p>
+    <div id="samplelist"></div>
+    <button class="act primary" id="addsample" disabled>Photograph crop here</button>
+    <input type="file" id="photoinput" accept="image/*" capture="environment" multiple hidden>
+    <div id="cropsummary"></div>
+  </div>
+
+  <div class="group">
+    <div class="lbl">Pl@ntNet API key</div>
+    <input class="txt" type="password" id="apikey" placeholder="Paste your key" autocomplete="off">
+    <p class="hint">Free tier allows 500 identifications a day. In your Pl@ntNet
+      settings, tick <b>expose my API key</b> and add this page's domain under
+      Authorized domains, or the browser request is rejected.<br><br>
+      <b>Prototype only.</b> A key in a public page can be read by anyone &mdash;
+      in production the call goes through your own backend.</p>
+  </div>
+
+  <div class="group">
     <div class="lbl">Vertices</div>
     <div class="scroll" id="vtable"><p class="empty">No points yet.</p></div>
     <button class="act danger" id="delsel" disabled>Delete selected vertex</button>
@@ -201,6 +250,8 @@ var unit = 'ha';
 var sel  = null;        // selected vertex index
 var dragIdx = null;
 var fix  = null;        // last GPS fix
+var samples = [];       // crop observations inside the polygon
+var seq = 0;
 var centred = false;    // have we jumped to the first fix?
 var follow  = true;     // keep recentring until the user pans
 
@@ -239,7 +290,7 @@ map.addControl(new maplibregl.ScaleControl({maxWidth:110,unit:'metric'}),'bottom
 var empty = {type:'FeatureCollection',features:[]};
 
 map.on('load', function(){
-  ['poly','ring','verts','mids','me'].forEach(function(id){
+  ['poly','ring','verts','mids','me','samp'].forEach(function(id){
     map.addSource(id,{type:'geojson',data:empty});
   });
 
@@ -258,6 +309,14 @@ map.on('load', function(){
       'circle-stroke-width':['case',['get','sel'],3,2],
       'circle-stroke-color':['case',['get','sel'],'#9ae65c','#10140f']
     }});
+  map.addLayer({id:'samp',type:'circle',source:'samp',
+    paint:{'circle-radius':8,
+           'circle-color':['case',['get','done'],'#9ae65c','#ffb020'],
+           'circle-opacity':0.85,
+           'circle-stroke-width':2,'circle-stroke-color':'#10140f'}});
+  map.addLayer({id:'samp-n',type:'symbol',source:'samp',
+    layout:{'text-field':['get','n'],'text-size':10,'text-font':['Noto Sans Regular']},
+    paint:{'text-color':'#10140f'}});
   map.addLayer({id:'me-acc',type:'circle',source:'me',
     paint:{'circle-radius':['get','px'],'circle-color':'#4db8ff','circle-opacity':0.13,
            'circle-stroke-width':1,'circle-stroke-color':'rgba(77,184,255,.5)'}});
@@ -319,6 +378,7 @@ function render(){
   readout();
   table();
   buttons();
+  if(typeof renderSamples === 'function') renderSamples();
 }
 
 /* ---------- measurement ---------- */
@@ -655,7 +715,23 @@ document.getElementById('export').onclick = function(){
         self_intersecting: turf.kinks(poly).features.length > 0,
         vertices: pts.map(function(p,i){
           return {seq:i+1, lat:p.lat, lng:p.lng, source:p.src, accuracy_m:p.acc};
-        })
+        }),
+        cropping_system: cropSystem(),
+        crops: cropBreakdown(m2),
+        crop_samples: samples.filter(function(x){ return x.state === 'done'; })
+          .map(function(x){
+            return {
+              seq: x.id, lat: x.lat, lng: x.lng,
+              position_source: x.src, inside_boundary: x.inside,
+              photo_count: x.photos.length,
+              top_suggestion: x.suggestions.length ? x.suggestions[0].sci : null,
+              top_suggestion_score: x.suggestions.length ? x.suggestions[0].score : null,
+              recorded_crop: x.confirmed,
+              determination: x.method,
+              accepted_confidence: x.confidence,
+              captured_at: x.ts
+            };
+          })
       },
       geometry: poly.geometry
     }]
@@ -668,6 +744,360 @@ document.getElementById('export').onclick = function(){
   document.body.appendChild(a); a.click();
   setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 };
+
+/* ================= CROP SAMPLING (Pl@ntNet) ================= */
+
+/* Scientific name -> the crop name a Ghanaian field officer actually uses.
+   Matched on the leading genus/species, so subspecies still resolve. */
+var CROPS = [
+  ['Zea mays','Maize'], ['Manihot esculenta','Cassava'], ['Theobroma cacao','Cocoa'],
+  ['Musa','Plantain / Banana'], ['Dioscorea','Yam'], ['Elaeis guineensis','Oil palm'],
+  ['Oryza','Rice'], ['Arachis hypogaea','Groundnut'], ['Vigna unguiculata','Cowpea'],
+  ['Solanum lycopersicum','Tomato'], ['Capsicum','Pepper'],
+  ['Abelmoschus esculentus','Okra'], ['Xanthosoma','Cocoyam'], ['Colocasia','Cocoyam'],
+  ['Hevea brasiliensis','Rubber'], ['Citrus','Citrus'], ['Ananas comosus','Pineapple'],
+  ['Sorghum','Sorghum'], ['Pennisetum glaucum','Millet'], ['Glycine max','Soyabean'],
+  ['Ipomoea batatas','Sweet potato'], ['Cola','Kola'], ['Anacardium occidentale','Cashew'],
+  ['Carica papaya','Pawpaw'], ['Mangifera indica','Mango'], ['Persea americana','Avocado'],
+  ['Saccharum','Sugarcane'], ['Cocos nucifera','Coconut'], ['Gossypium','Cotton'],
+  ['Phaseolus','Beans'], ['Cucumis','Cucumber / Melon'], ['Cucurbita','Pumpkin'],
+  ['Amaranthus','Alefu'], ['Corchorus','Ayoyo'], ['Solanum aethiopicum','Garden egg']
+];
+var MANUAL = ['Maize','Cassava','Cocoa','Plantain / Banana','Yam','Oil palm','Rice',
+  'Groundnut','Cowpea','Tomato','Pepper','Okra','Cocoyam','Rubber','Citrus','Pineapple',
+  'Sorghum','Millet','Soyabean','Sweet potato','Kola','Cashew','Pawpaw','Mango',
+  'Avocado','Sugarcane','Coconut','Garden egg','Fallow / bare','Other'];
+
+function localName(sci){
+  if(!sci) return null;
+  for(var i=0;i<CROPS.length;i++){
+    if(sci.toLowerCase().indexOf(CROPS[i][0].toLowerCase()) === 0) return CROPS[i][1];
+  }
+  return null;
+}
+
+function apiKey(){
+  var el = document.getElementById('apikey');
+  return el ? el.value.trim() : '';
+}
+
+/* restore key across reloads - convenience only, never a place for a real secret */
+try{
+  var saved = localStorage.getItem('pn_key');
+  if(saved) document.getElementById('apikey').value = saved;
+}catch(e){}
+document.getElementById('apikey').addEventListener('change', function(){
+  try{ localStorage.setItem('pn_key', this.value.trim()); }catch(e){}
+});
+
+/* ---- where is the officer standing, and is it inside the field? ---- */
+function samplePoint(){
+  var poly = polygon();
+  if(!poly) return null;
+  var lng, lat, src;
+  if(fix){ lng = fix.longitude; lat = fix.latitude; src = fix.simulated ? 'sim' : 'gps'; }
+  else   { var c = map.getCenter(); lng = c.lng; lat = c.lat; src = 'centre'; }
+  var inside = turf.booleanPointInPolygon(turf.point([lng,lat]), poly);
+  return {lng:lng, lat:lat, src:src, inside:inside};
+}
+
+document.getElementById('addsample').onclick = function(){
+  var pt = samplePoint();
+  if(!pt) return;
+  if(!pt.inside){
+    if(!confirmInline('You are outside the field boundary. Record this sample anyway?')) return;
+  }
+  pendingPoint = pt;
+  document.getElementById('photoinput').value = '';
+  document.getElementById('photoinput').click();
+};
+
+/* the artifact-style confirm: a real dialog, since confirm() is unreliable in webviews */
+function confirmInline(msg){ return window.confirm(msg); }
+
+var pendingPoint = null;
+
+document.getElementById('photoinput').onchange = function(e){
+  var files = Array.prototype.slice.call(e.target.files || []).slice(0,5);
+  if(!files.length || !pendingPoint) return;
+
+  var smp = {
+    id: ++seq,
+    lng: pendingPoint.lng, lat: pendingPoint.lat, src: pendingPoint.src,
+    inside: pendingPoint.inside,
+    photos: [], suggestions: [], confirmed: null,
+    method: null, confidence: null, state: 'reading',
+    ts: new Date().toISOString()
+  };
+  pendingPoint = null;
+  samples.push(smp);
+  renderSamples();
+
+  var left = files.length;
+  files.forEach(function(f){
+    var r = new FileReader();
+    r.onload = function(ev){
+      smp.photos.push({blob:f, name:f.name || 'photo.jpg', organ:'auto', url:ev.target.result});
+      if(--left === 0){ identify(smp); }
+      renderSamples();
+    };
+    r.readAsDataURL(f);
+  });
+};
+
+/* ---- the Pl@ntNet call ---- */
+function identify(smp){
+  var key = apiKey();
+  if(!key){
+    smp.state = 'nokey';
+    renderSamples();
+    return;
+  }
+  smp.state = 'sending';
+  renderSamples();
+
+  var fd = new FormData();
+  smp.photos.forEach(function(p){
+    fd.append('images', p.blob, p.name);
+    fd.append('organs', p.organ);
+  });
+
+  var url = 'https://my-api.plantnet.org/v2/identify/all?api-key=' +
+            encodeURIComponent(key) + '&lang=en&nb-results=5';
+
+  fetch(url, {method:'POST', body:fd})
+    .then(function(r){
+      return r.json().then(function(j){ return {ok:r.ok, status:r.status, body:j}; });
+    })
+    .then(function(res){
+      if(!res.ok){
+        smp.state = 'error';
+        smp.error = (res.body && res.body.message) ? res.body.message :
+                    ('HTTP ' + res.status);
+        if(res.status === 404) smp.error = 'No species matched. Try a closer shot of a single leaf.';
+        if(res.status === 401) smp.error = 'Key rejected. Check the key and your authorized domains.';
+        if(res.status === 429) smp.error = 'Daily quota reached (500 on the free tier).';
+        renderSamples();
+        return;
+      }
+      var j = res.body;
+      if(typeof j.remainingIdentificationRequests === 'number'){
+        document.getElementById('quota').textContent =
+          j.remainingIdentificationRequests + ' left today';
+      }
+      smp.suggestions = (j.results || []).slice(0,4).map(function(r){
+        var sci = r.species && r.species.scientificNameWithoutAuthor;
+        var common = (r.species && r.species.commonNames && r.species.commonNames[0]) || null;
+        return {sci:sci, local:localName(sci), common:common, score:r.score};
+      });
+      smp.state = smp.suggestions.length ? 'ready' : 'empty';
+      renderSamples();
+    })
+    .catch(function(err){
+      smp.state = 'error';
+      smp.error = 'Request failed (' + err.message + '). Offline? Record the crop by hand.';
+      renderSamples();
+    });
+}
+
+/* ---- confirm / override ---- */
+function confirmCrop(id, label, how, conf){
+  var smp = samples.filter(function(x){ return x.id === id; })[0];
+  if(!smp) return;
+  smp.confirmed = label;
+  smp.method = how;
+  smp.confidence = (conf == null ? null : conf);
+  smp.state = 'done';
+  renderSamples();
+}
+
+function manualPick(id){
+  var smp = samples.filter(function(x){ return x.id === id; })[0];
+  if(!smp) return;
+  smp.state = 'manual';
+  renderSamples();
+}
+
+function dropSample(id){
+  samples = samples.filter(function(x){ return x.id !== id; });
+  renderSamples();
+}
+
+/* ---- rendering ---- */
+function renderSamples(){
+  var list = document.getElementById('samplelist');
+  var notice = document.getElementById('cropnotice');
+  var btn = document.getElementById('addsample');
+  var poly = polygon();
+
+  btn.disabled = !poly;
+  notice.hidden = !!poly || samples.length > 0;
+
+  list.innerHTML = samples.map(function(s){
+    var cls = s.state === 'done' ? 'done' : 'pending';
+    var head = '<div class="samp-hd"><b>Sample ' + s.id + '</b><span>' +
+      s.lat.toFixed(5) + ', ' + s.lng.toFixed(5) +
+      (s.inside ? '' : ' &middot; <span style="color:var(--warn)">outside</span>') +
+      '</span></div>';
+
+    var thumbs = s.photos.length
+      ? '<div class="thumbs">' + s.photos.map(function(p){
+          return '<img src="' + p.url + '" alt="">';
+        }).join('') + '</div>'
+      : '';
+
+    var body = '';
+    if(s.state === 'reading' || s.state === 'sending'){
+      body = '<div style="font-size:12px;color:var(--muted)"><span class="spin"></span> ' +
+        (s.state === 'reading' ? 'Reading photo&hellip;' : 'Identifying&hellip;') + '</div>';
+    } else if(s.state === 'nokey'){
+      body = '<div style="font-size:12px;color:var(--warn)">No API key set. ' +
+        'Paste one below, or <button class="mini" data-manual="' + s.id +
+        '">record the crop by hand</button>.</div>';
+    } else if(s.state === 'error' || s.state === 'empty'){
+      body = '<div style="font-size:12px;color:var(--bad)">' +
+        (s.error || 'Nothing recognised.') + '</div>' +
+        '<button class="mini" data-manual="' + s.id + '">Record the crop by hand</button>';
+    } else if(s.state === 'ready'){
+      body = s.suggestions.map(function(g){
+        var label = g.local || g.common || g.sci;
+        var sub = g.local ? g.sci : (g.common ? g.sci : '');
+        return '<button class="cand" data-pick="' + s.id + '" data-label="' +
+          esc(label) + '" data-conf="' + g.score.toFixed(4) + '">' +
+          '<span>' + esc(label) + (sub ? '<span class="sci">' + esc(sub) + '</span>' : '') + '</span>' +
+          '<span class="pc">' + Math.round(g.score*100) + '%</span></button>';
+      }).join('') +
+      '<button class="mini" data-manual="' + s.id + '">None of these &mdash; choose manually</button>';
+    } else if(s.state === 'manual'){
+      body = '<select class="txt" data-mansel="' + s.id + '">' +
+        '<option value="">Select crop&hellip;</option>' +
+        MANUAL.map(function(c){ return '<option>' + esc(c) + '</option>'; }).join('') +
+        '</select>';
+    } else if(s.state === 'done'){
+      body = '<div class="chosen">&#10003; ' + esc(s.confirmed) +
+        '<span class="meta">' + s.method +
+        (s.confidence != null ? ' &middot; ' + Math.round(s.confidence*100) + '%' : '') +
+        '</span></div>' +
+        '<button class="mini" data-manual="' + s.id + '">Change</button>';
+    }
+
+    return '<div class="samp ' + cls + '">' + head + thumbs + body +
+      ' <button class="mini" data-drop="' + s.id + '" style="float:right">Remove</button></div>';
+  }).join('');
+
+  wireSampleButtons();
+  drawSamples();
+  cropSummary();
+}
+
+function esc(t){
+  return String(t).replace(/[&<>"]/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+  });
+}
+
+function wireSampleButtons(){
+  var list = document.getElementById('samplelist');
+  Array.prototype.forEach.call(list.querySelectorAll('[data-pick]'), function(b){
+    b.onclick = function(){
+      confirmCrop(+b.dataset.pick, b.dataset.label, 'photo-assisted', +b.dataset.conf);
+    };
+  });
+  Array.prototype.forEach.call(list.querySelectorAll('[data-manual]'), function(b){
+    b.onclick = function(){ manualPick(+b.dataset.manual); };
+  });
+  Array.prototype.forEach.call(list.querySelectorAll('[data-drop]'), function(b){
+    b.onclick = function(){ dropSample(+b.dataset.drop); };
+  });
+  Array.prototype.forEach.call(list.querySelectorAll('[data-mansel]'), function(sel){
+    sel.onchange = function(){
+      if(sel.value) confirmCrop(+sel.dataset.mansel, sel.value, 'observed', null);
+    };
+  });
+}
+
+function drawSamples(){
+  if(!map.getSource('samp')) return;
+  map.getSource('samp').setData({
+    type:'FeatureCollection',
+    features: samples.map(function(s){
+      return {type:'Feature',
+        properties:{n:String(s.id), done:(s.state === 'done')},
+        geometry:{type:'Point',coordinates:[s.lng,s.lat]}};
+    })
+  });
+}
+
+/* ---- the agreement check: disagreement means intercropping ---- */
+function cropSummary(){
+  var el = document.getElementById('cropsummary');
+  var done = samples.filter(function(s){ return s.state === 'done'; });
+  if(!done.length){ el.innerHTML = ''; return; }
+
+  var tally = {};
+  done.forEach(function(s){ tally[s.confirmed] = (tally[s.confirmed] || 0) + 1; });
+  var names = Object.keys(tally).sort(function(a,b){ return tally[b] - tally[a]; });
+
+  var poly = polygon();
+  var m2 = poly ? turf.area(poly) : 0;
+  var u = UNITS[unit];
+
+  var rows = names.map(function(n){
+    var share = tally[n] / done.length;
+    return '<tr><td style="color:var(--fg)">' + esc(n) + '</td>' +
+      '<td>' + tally[n] + '/' + done.length + '</td>' +
+      '<td style="color:var(--accent)">' + (m2*share*u.f).toFixed(u.dp) + ' ' + u.lbl + '</td></tr>';
+  }).join('');
+
+  var head = names.length > 1
+    ? '<div class="flag ok" style="margin-bottom:8px"><span class="dot"></span><span>' +
+      '<b>Mixed stand.</b> Samples returned ' + names.length + ' different crops, so this ' +
+      'plot is likely intercropped. The split below is the sample ratio &mdash; an opening ' +
+      'estimate, not a measurement. Adjust it against plant density before recording.' +
+      '</span></div>'
+    : '<div class="flag ok" style="margin-bottom:8px"><span class="dot"></span><span>' +
+      '<b>Pure stand.</b> All ' + done.length + ' sample' + (done.length===1?'':'s') +
+      ' returned the same crop.' + (done.length < 3 ?
+      ' Take at least three before relying on that.' : '') + '</span></div>';
+
+  el.innerHTML = head +
+    '<table><thead><tr><th>Crop</th><th>Samples</th><th>Est. area</th></tr></thead>' +
+    '<tbody>' + rows + '</tbody></table>';
+}
+
+function doneSamples(){
+  return samples.filter(function(s){ return s.state === 'done'; });
+}
+
+function cropSystem(){
+  var d = doneSamples();
+  if(!d.length) return 'unrecorded';
+  var set = {};
+  d.forEach(function(s){ set[s.confirmed] = 1; });
+  return Object.keys(set).length > 1 ? 'mixed' : 'pure';
+}
+
+/* Sample ratio as the opening allocation. FAO's convention for associated crops
+   is the sole-stand equivalent each crop would have covered, estimated from
+   plant density, seed rate or an eye estimate -- so this is flagged as a basis
+   the officer is expected to revise, never as a measurement. */
+function cropBreakdown(m2){
+  var d = doneSamples();
+  if(!d.length) return [];
+  var tally = {};
+  d.forEach(function(s){ tally[s.confirmed] = (tally[s.confirmed] || 0) + 1; });
+  return Object.keys(tally).map(function(n){
+    var share = tally[n] / d.length;
+    return {
+      crop: n,
+      samples: tally[n],
+      share_pct: +(share*100).toFixed(1),
+      allocation_basis: 'sample-ratio-provisional',
+      effective_area_m2: +(m2*share).toFixed(2),
+      effective_area_ha: +((m2*share)/10000).toFixed(4)
+    };
+  }).sort(function(a,b){ return b.share_pct - a.share_pct; });
+}
 
 /* keyboard */
 document.addEventListener('keydown', function(e){
